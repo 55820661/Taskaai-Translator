@@ -2,7 +2,7 @@ flask
 flask-cors
 python-docx
 pandas
-openai
+openai==0.28.1
 werkzeug
 openpyxl
 
