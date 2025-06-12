@@ -1,4 +1,5 @@
-from flask import Flask, request, send_file, jsonify
+
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
@@ -12,9 +13,8 @@ import openai
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["UPLOAD_FOLDER"] = "uploads"
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -27,11 +27,12 @@ def match_terms_to_paragraph(paragraph, terms_df):
             matched.append(f"{row['Term']} = {row['Translation']}")
     return matched
 
-@app.route('/translate', methods=['POST'])
+@app.route("/translate", methods=["POST"])
 def translate_file():
     service = request.form.get("service", "Translation_in_Excel")
-    uploaded_file = request.files.get('file')
-    glossary_file = request.files.get('glossary')
+
+    uploaded_file = request.files.get("file")
+    glossary_file = request.files.get("glossary")
 
     if not uploaded_file:
         return jsonify({"error": "No file uploaded"}), 400
@@ -50,7 +51,7 @@ def translate_file():
             paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
             paragraphs_df = pd.DataFrame(paragraphs, columns=["Extracted Paragraphs"])
         else:
-            return jsonify({"error": "Unsupported file type for translation"}), 400
+            return jsonify({"error": "Unsupported file type"}), 400
 
         if glossary_file:
             glossary_name = secure_filename(glossary_file.filename)
@@ -65,15 +66,8 @@ def translate_file():
             glossary_df = pd.DataFrame(columns=["Term", "Translation"])
 
         intro_paragraphs = paragraphs_df.iloc[:2, 0].tolist()
-        joined_intro = "
-".join(intro_paragraphs)
-        context_prompt = f"""You are given the beginning of a technical or regulatory document.
-Your task is to generate a single clear English sentence that describes the main topic or context of the document.
-
-Content:
-{joined_intro}
-
-Context hint:"""
+        joined_intro = "\n".join(intro_paragraphs)
+        context_prompt = f"You are given the beginning of a technical or regulatory document.\nYour task is to generate a single clear English sentence that describes the main topic or context of the document.\n\nContent:\n{joined_intro}\n\nContext hint:"
 
         try:
             context_response = openai.ChatCompletion.create(
@@ -86,31 +80,18 @@ Context hint:"""
                 max_tokens=50
             )
             context_hint = context_response.choices[0].message.content.strip()
-        except Exception:
+        except Exception as e:
             context_hint = "[Context generation failed]"
 
         translations = []
-        for paragraph in paragraphs_df.iloc[:, 0]:
+        for i, paragraph in enumerate(paragraphs_df.iloc[:, 0]):
             if '----media/' in paragraph:
                 translations.append(paragraph.strip())
                 continue
 
             matched_terms = match_terms_to_paragraph(paragraph, glossary_df)
-            glossary_text = "
-".join(matched_terms) if matched_terms else "[No relevant glossary terms]"
-            prompt = f"""[STRICT HAMADA TRANSLATION PROMPT]
-
-Document Context: {context_hint}
-
-Translate the following text from English to Arabic using precise and literal translation.
-Do not paraphrase or summarize. Use the glossary below exactly as provided if matching terms are found.
-Maintain the original sentence structure and order. Avoid any interpretation or stylistic changes.
-
-Glossary:
-{glossary_text}
-
-Text:
-{paragraph}"""
+            glossary_text = "\n".join(matched_terms) if matched_terms else "[No relevant glossary terms]"
+            prompt = f"[STRICT HAMADA TRANSLATION PROMPT]\n\nDocument Context: {context_hint}\n\nTranslate the following text from English to Arabic using precise and literal translation.\nDo not paraphrase or summarize. Use the glossary below exactly as provided if matching terms are found.\nMaintain the original sentence structure and order. Avoid any interpretation or stylistic changes.\n\nGlossary:\n{glossary_text}\n\nText:\n{paragraph}"
 
             try:
                 response = openai.ChatCompletion.create(
@@ -133,11 +114,11 @@ Text:
 
     elif service == "Convert_to_Word":
         if file_ext != ".xlsx":
-            return jsonify({"error": "Expected an Excel file for Word generation"}), 400
+            return jsonify({"error": "Please upload a translated Excel file (.xlsx)"}), 400
 
         df = pd.read_excel(input_path)
         if "Translation" not in df.columns:
-            return jsonify({"error": "Missing 'Translation' column in Excel file"}), 400
+            return jsonify({"error": "No 'Translation' column found in Excel file."}), 400
 
         word_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.docx")
         doc = Document()
@@ -145,6 +126,8 @@ Text:
         style.font.name = 'Simplified Arabic'
         style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Simplified Arabic')
         style.font.size = Pt(14)
+        section = doc.sections[0]
+        section.right_margin = section.left_margin
         doc.styles['Normal'].paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
 
         for text in df["Translation"].fillna(""):
@@ -158,4 +141,4 @@ Text:
         return jsonify({"error": "Unknown service type"}), 400
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000")
+    app.run(host="0.0.0.0", port=10000)
