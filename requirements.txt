@@ -1,11 +1,6 @@
-openai==0.28
-python-dotenv
-docx
-python-docx
-pandas
-tqdm
 flask
 flask-cors
-openpyxl
-
-
+python-docx
+pandas
+openai
+werkzeug

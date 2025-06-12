@@ -1,18 +1,20 @@
-
-from flask import Flask, request, jsonify
+from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
-
+from werkzeug.utils import secure_filename
+import os
 import pandas as pd
 from docx import Document
 from docx.shared import Pt
 from docx.oxml.ns import qn
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-import os
-import tempfile
 import openai
 
 app = Flask(__name__)
 CORS(app)
+
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -27,19 +29,20 @@ def match_terms_to_paragraph(paragraph, terms_df):
 
 @app.route('/translate', methods=['POST'])
 def translate_file():
+    service = request.form.get("service", "Translation_in_Excel")
     uploaded_file = request.files.get('file')
     glossary_file = request.files.get('glossary')
 
     if not uploaded_file:
         return jsonify({"error": "No file uploaded"}), 400
 
-    filename = os.path.splitext(uploaded_file.filename)[0]
-    file_ext = os.path.splitext(uploaded_file.filename)[1].lower()
+    filename_raw = uploaded_file.filename
+    filename_clean = os.path.splitext(secure_filename(filename_raw))[0]
+    file_ext = os.path.splitext(filename_raw)[1].lower()
+    input_path = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(filename_raw))
+    uploaded_file.save(input_path)
 
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        input_path = os.path.join(tmpdirname, uploaded_file.filename)
-        uploaded_file.save(input_path)
-
+    if service == "Translation_in_Excel":
         if file_ext == ".csv":
             paragraphs_df = pd.read_csv(input_path)
         elif file_ext == ".docx":
@@ -47,10 +50,11 @@ def translate_file():
             paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
             paragraphs_df = pd.DataFrame(paragraphs, columns=["Extracted Paragraphs"])
         else:
-            return jsonify({"error": "Unsupported file type"}), 400
+            return jsonify({"error": "Unsupported file type for translation"}), 400
 
         if glossary_file:
-            glossary_path = os.path.join(tmpdirname, glossary_file.filename)
+            glossary_name = secure_filename(glossary_file.filename)
+            glossary_path = os.path.join(app.config["UPLOAD_FOLDER"], glossary_name)
             glossary_file.save(glossary_path)
             doc = Document(glossary_path)
             table = doc.tables[0]
@@ -61,7 +65,8 @@ def translate_file():
             glossary_df = pd.DataFrame(columns=["Term", "Translation"])
 
         intro_paragraphs = paragraphs_df.iloc[:2, 0].tolist()
-        joined_intro = "\n".join(intro_paragraphs)
+        joined_intro = "
+".join(intro_paragraphs)
         context_prompt = f"""You are given the beginning of a technical or regulatory document.
 Your task is to generate a single clear English sentence that describes the main topic or context of the document.
 
@@ -81,17 +86,18 @@ Context hint:"""
                 max_tokens=50
             )
             context_hint = context_response.choices[0].message.content.strip()
-        except Exception as e:
+        except Exception:
             context_hint = "[Context generation failed]"
 
         translations = []
-        for i, paragraph in enumerate(paragraphs_df.iloc[:, 0]):
+        for paragraph in paragraphs_df.iloc[:, 0]:
             if '----media/' in paragraph:
                 translations.append(paragraph.strip())
                 continue
 
             matched_terms = match_terms_to_paragraph(paragraph, glossary_df)
-            glossary_text = "\n".join(matched_terms) if matched_terms else "[No relevant glossary terms]"
+            glossary_text = "
+".join(matched_terms) if matched_terms else "[No relevant glossary terms]"
             prompt = f"""[STRICT HAMADA TRANSLATION PROMPT]
 
 Document Context: {context_hint}
@@ -121,33 +127,35 @@ Text:
                 translations.append(f"[Error] {str(e)}")
 
         paragraphs_df["Translation"] = translations
-
-        excel_output = os.path.join(tmpdirname, f"{filename}_translated.xlsx")
-        word_output = os.path.join(tmpdirname, f"{filename}_translated.docx")
-
+        excel_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.xlsx")
         paragraphs_df.to_excel(excel_output, index=False)
+        return send_file(excel_output, as_attachment=True)
 
+    elif service == "Convert_to_Word":
+        if file_ext != ".xlsx":
+            return jsonify({"error": "Expected an Excel file for Word generation"}), 400
+
+        df = pd.read_excel(input_path)
+        if "Translation" not in df.columns:
+            return jsonify({"error": "Missing 'Translation' column in Excel file"}), 400
+
+        word_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.docx")
         doc = Document()
         style = doc.styles['Normal']
         style.font.name = 'Simplified Arabic'
         style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Simplified Arabic')
         style.font.size = Pt(14)
-        section = doc.sections[0]
-        section.right_margin = section.left_margin
         doc.styles['Normal'].paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
 
-        for text in translations:
-            if isinstance(text, str):
-                para = doc.add_paragraph(text.strip())
-                para.paragraph_format.space_after = Pt(0)
+        for text in df["Translation"].fillna(""):
+            para = doc.add_paragraph(str(text).strip())
+            para.paragraph_format.space_after = Pt(0)
 
         doc.save(word_output)
+        return send_file(word_output, as_attachment=True)
 
-        return {
-            "excel_file": f"{filename}_translated.xlsx",
-            "word_file": f"{filename}_translated.docx",
-            "message": "✅ Translation complete"
-        }
+    else:
+        return jsonify({"error": "Unknown service type"}), 400
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10000")
