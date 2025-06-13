@@ -29,6 +29,51 @@ def match_terms_to_paragraph(paragraph, terms_df):
 
 @app.route("/translate", methods=["POST"])
 def translate_file():
+
+    # 🧹 حذف ملفات إكسل ووورد أقدم من ٤٨ ساعة
+    now = time.time()
+    for f in os.listdir(app.config["UPLOAD_FOLDER"]):
+        full_path = os.path.join(app.config["UPLOAD_FOLDER"], f)
+        if not os.path.isfile(full_path):
+            continue
+        age = now - os.path.getmtime(full_path)
+        if (f.endswith(".xlsx") or f.endswith(".docx")) and age > 172800:
+            os.remove(full_path)
+
+    # 🔍 التحقق من وجود ملف مؤقت مطابق
+    import difflib
+
+    def normalize(text):
+        return text.lower().strip().replace("\n", "").replace("  ", " ")
+
+    def is_similar(a, b):
+        return difflib.SequenceMatcher(None, normalize(a), normalize(b)).ratio() >= 0.8
+
+    matching_temp_file = None
+    for f in os.listdir(app.config["UPLOAD_FOLDER"]):
+        if "_temp_translated.xlsx" in f.lower() and filename_clean.lower() in f.lower():
+            matching_temp_file = os.path.join(app.config["UPLOAD_FOLDER"], f)
+            break
+
+    if matching_temp_file:
+        try:
+            temp_df = pd.read_excel(matching_temp_file)
+            if "Extracted Paragraphs" in temp_df.columns:
+                temp_paragraphs = temp_df["Extracted Paragraphs"].dropna().tolist()[:3]
+                if file_ext == ".csv":
+                    new_paragraphs = pd.read_csv(input_path)["Extracted Paragraphs"].dropna().tolist()[:3]
+                else:
+                    doc = Document(input_path)
+                    new_paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()][:3]
+                matches = sum(is_similar(tp, np) for tp, np in zip(temp_paragraphs, new_paragraphs))
+                if matches >= 2:
+                    paragraphs_df = temp_df.copy()
+                    excel_output = matching_temp_file.replace("_temp_translated.xlsx", f"_{time.strftime('%Y%m%d_%H%M')}_translated.xlsx")
+                    os.rename(matching_temp_file, excel_output)
+                    return send_file(excel_output, as_attachment=True)
+        except Exception as e:
+            print(f"[تحذير] فشل التحقق من الملف المؤقت: {e}")
+
     service = request.form.get("service", "Translation_in_Excel")
 
     uploaded_file = request.files.get("file")
@@ -139,11 +184,7 @@ Document Context:
                 continue
 
             paragraph = row["Extracted Paragraphs"]
-            if '----media/' in paragraph:
-                paragraphs_df.at[idx, "Translation"] = paragraph.strip()
-                paragraphs_df.at[idx, "Status"] = "Skipped"
-                continue
-
+            
             matched_terms = match_terms_to_paragraph(paragraph, glossary_df)
             glossary_section = ""
             if matched_terms:
@@ -180,7 +221,12 @@ Document Context:
         if glossary_path and os.path.exists(glossary_path):
             os.remove(glossary_path)
 
-        return send_file(excel_output, as_attachment=True)
+        response = send_file(excel_output, as_attachment=True)
+
+        if os.path.exists(excel_output):
+            os.remove(excel_output)
+
+        return response
 
     elif service == "Convert_to_Word":
         if file_ext != ".xlsx":
@@ -195,6 +241,28 @@ Document Context:
 
         word_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.docx")
         doc = Document()
+
+        # تحديد التنسيق بناءً على اللغة المستهدفة
+        is_arabic = target_lang.lower().strip() in ["arabic", "ar"]
+
+        style = doc.styles['Normal']
+        if is_arabic:
+            style.font.name = 'Simplified Arabic'
+            style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Simplified Arabic')
+            style.font.size = Pt(14)
+            doc.styles['Normal'].paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+            doc.styles['Normal'].paragraph_format.left_to_right = False
+            doc.styles['Normal'].paragraph_format.right_to_left = True
+            doc.settings.language_id = 1025  # Arabic - Saudi Arabia
+        else:
+            style.font.name = 'Times New Roman'
+            style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Times New Roman')
+            style.font.size = Pt(13)
+            doc.styles['Normal'].paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+            doc.styles['Normal'].paragraph_format.left_to_right = True
+            doc.styles['Normal'].paragraph_format.right_to_left = False
+            doc.settings.language_id = 1033  # English - US
+
         style = doc.styles['Normal']
         style.font.name = 'Simplified Arabic'
         style._element.rPr.rFonts.set(qn('w:eastAsia'), 'Simplified Arabic')
