@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -9,6 +8,7 @@ from docx.shared import Pt
 from docx.oxml.ns import qn
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 import openai
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -34,8 +34,11 @@ def translate_file():
     uploaded_file = request.files.get("file")
     glossary_file = request.files.get("glossary")
 
+    source_lang = request.form.get("source_lang", "English")
+    target_lang = request.form.get("target_lang", "Arabic")
+
     if not uploaded_file:
-        return jsonify({"error": "No file uploaded"}), 400
+        return jsonify({"error": "لم يتم رفع أي ملف."}), 400
 
     filename_raw = uploaded_file.filename
     filename_clean = os.path.splitext(secure_filename(filename_raw))[0]
@@ -43,31 +46,67 @@ def translate_file():
     input_path = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(filename_raw))
     uploaded_file.save(input_path)
 
-    if service == "Translation_in_Excel":
-        if file_ext == ".csv":
-            paragraphs_df = pd.read_csv(input_path)
-        elif file_ext == ".docx":
-            doc = Document(input_path)
-            paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-            paragraphs_df = pd.DataFrame(paragraphs, columns=["Extracted Paragraphs"])
-        else:
-            return jsonify({"error": "Unsupported file type"}), 400
+    time.sleep(0.2)
 
+    glossary_path = None
+
+    if service == "Translation_in_Excel":
+        try:
+            if file_ext == ".csv":
+                paragraphs_df = pd.read_csv(input_path)
+                if "Extracted Paragraphs" not in paragraphs_df.columns:
+                    return jsonify({"error": "الملف لا يحتوي على عمود 'Extracted Paragraphs'."}), 400
+            elif file_ext == ".docx":
+                doc = Document(input_path)
+                paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                paragraphs_df = pd.DataFrame(paragraphs, columns=["Extracted Paragraphs"])
+            else:
+                return jsonify({"error": "صيغة الملف غير مدعومة. الرجاء رفع ملف .docx أو .csv"}), 400
+        except Exception as e:
+            return jsonify({"error": f"فشل في قراءة الملف: {str(e)}"}), 400
+
+        glossary_df = pd.DataFrame(columns=["Term", "Translation"])
         if glossary_file:
-            glossary_name = secure_filename(glossary_file.filename)
-            glossary_path = os.path.join(app.config["UPLOAD_FOLDER"], glossary_name)
-            glossary_file.save(glossary_path)
-            doc = Document(glossary_path)
-            table = doc.tables[0]
-            terms = [row.cells[0].text.strip() for row in table.rows[1:]]
-            translations_glossary = [row.cells[1].text.strip() for row in table.rows[1:]]
-            glossary_df = pd.DataFrame({"Term": terms, "Translation": translations_glossary})
+            try:
+                glossary_name = secure_filename(glossary_file.filename)
+                glossary_path = os.path.join(app.config["UPLOAD_FOLDER"], glossary_name)
+                glossary_file.save(glossary_path)
+                doc = Document(glossary_path)
+                if not doc.tables:
+                    return jsonify({"error": "ملف المصطلحات لا يحتوي على أي جدول."}), 400
+                table = doc.tables[0]
+                if len(table.columns) < 2:
+                    return jsonify({"error": "الجدول في ملف المصطلحات يجب أن يحتوي على عمودين على الأقل."}), 400
+                terms = [row.cells[0].text.strip() for row in table.rows[1:]]
+                translations_glossary = [row.cells[1].text.strip() for row in table.rows[1:]]
+                glossary_df = pd.DataFrame({"Term": terms, "Translation": translations_glossary})
+            except Exception as e:
+                return jsonify({"error": f"فشل في قراءة ملف المصطلحات: {str(e)}"}), 400
+
+        excel_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.xlsx")
+
+        if os.path.exists(excel_output):
+            paragraphs_df_existing = pd.read_excel(excel_output)
+            if "Translation" in paragraphs_df_existing.columns:
+                paragraphs_df["Translation"] = paragraphs_df_existing["Translation"]
+                paragraphs_df["Status"] = paragraphs_df_existing.get("Status", "")
+            else:
+                paragraphs_df["Translation"] = ""
+                paragraphs_df["Status"] = ""
         else:
-            glossary_df = pd.DataFrame(columns=["Term", "Translation"])
+            paragraphs_df["Translation"] = ""
+            paragraphs_df["Status"] = ""
 
         intro_paragraphs = paragraphs_df.iloc[:2, 0].tolist()
-        joined_intro = "\n".join(intro_paragraphs)
-        context_prompt = f"You are given the beginning of a technical or regulatory document.\nYour task is to generate a single clear English sentence that describes the main topic or context of the document.\n\nContent:\n{joined_intro}\n\nContext hint:"
+        joined_intro = "
+".join(intro_paragraphs)
+        context_prompt = f"You are given the beginning of a technical or regulatory document.
+Your task is to generate a single clear English sentence that describes the main topic or context of the document.
+
+Content:
+{joined_intro}
+
+Context hint:"
 
         try:
             context_response = openai.ChatCompletion.create(
@@ -81,17 +120,44 @@ def translate_file():
             )
             context_hint = context_response.choices[0].message.content.strip()
         except Exception as e:
-            context_hint = "[Context generation failed]"
+            context_hint = "[تعذر توليد سياق المستند]"
+            print(f"[تحذير] فشل في توليد السياق: {e}")
 
-        translations = []
-        for i, paragraph in enumerate(paragraphs_df.iloc[:, 0]):
+        Translation_Prompt = f"""As a Translator, your task is to convert the following text from {source_lang} to {target_lang},
+ensuring that the terminology is precise and the language flows naturally.
+Each word and phrase must align with the context of this field, as the content pertains to legal and technical domains.
+Your focus should be on producing a text that is clear, accurate, and easy to read
+while fully preserving the original meaning and structure.
+The translation must be suitable for a reverse translation that closely matches the original,
+avoiding any extra content, interpretation, or logical gaps. Do not include translator notes.
+
+Document Context:
+{context_hint}
+"""
+
+        for idx, row in paragraphs_df.iterrows():
+            if row["Translation"] and row["Translation"] != "missing translation":
+                continue
+
+            paragraph = row["Extracted Paragraphs"]
             if '----media/' in paragraph:
-                translations.append(paragraph.strip())
+                paragraphs_df.at[idx, "Translation"] = paragraph.strip()
+                paragraphs_df.at[idx, "Status"] = "Skipped"
                 continue
 
             matched_terms = match_terms_to_paragraph(paragraph, glossary_df)
-            glossary_text = "\n".join(matched_terms) if matched_terms else "[No relevant glossary terms]"
-            prompt = f"[STRICT HAMADA TRANSLATION PROMPT]\n\nDocument Context: {context_hint}\n\nTranslate the following text from English to Arabic using precise and literal translation.\nDo not paraphrase or summarize. Use the glossary below exactly as provided if matching terms are found.\nMaintain the original sentence structure and order. Avoid any interpretation or stylistic changes.\n\nGlossary:\n{glossary_text}\n\nText:\n{paragraph}"
+            glossary_section = ""
+            if matched_terms:
+                glossary_text = "
+".join(matched_terms)
+                glossary_section = f"Glossary:
+{glossary_text}
+
+"
+
+            prompt = f"{Translation_Prompt}
+{glossary_section}Text:
+{paragraph}"
 
             try:
                 response = openai.ChatCompletion.create(
@@ -103,22 +169,31 @@ def translate_file():
                     temperature=0.0,
                     max_tokens=1000
                 )
-                translations.append(response.choices[0].message.content.strip())
+                paragraphs_df.at[idx, "Translation"] = response.choices[0].message.content.strip()
+                paragraphs_df.at[idx, "Status"] = "Success"
             except Exception as e:
-                translations.append(f"[Error] {str(e)}")
+                paragraphs_df.at[idx, "Translation"] = "missing translation"
+                paragraphs_df.at[idx, "Status"] = "Failed"
 
-        paragraphs_df["Translation"] = translations
-        excel_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.xlsx")
         paragraphs_df.to_excel(excel_output, index=False)
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        if glossary_path and os.path.exists(glossary_path):
+            os.remove(glossary_path)
+
         return send_file(excel_output, as_attachment=True)
 
     elif service == "Convert_to_Word":
         if file_ext != ".xlsx":
-            return jsonify({"error": "Please upload a translated Excel file (.xlsx)"}), 400
+            return jsonify({"error": "يرجى رفع ملف Excel صالح يحتوي على الترجمة."}), 400
+        try:
+            df = pd.read_excel(input_path)
+        except Exception as e:
+            return jsonify({"error": f"فشل في قراءة ملف Excel: {str(e)}"}), 400
 
-        df = pd.read_excel(input_path)
         if "Translation" not in df.columns:
-            return jsonify({"error": "No 'Translation' column found in Excel file."}), 400
+            return jsonify({"error": "ملف الترجمة لا يحتوي على عمود 'Translation'."}), 400
 
         word_output = os.path.join(app.config["UPLOAD_FOLDER"], f"{filename_clean}_translated.docx")
         doc = Document()
@@ -135,10 +210,14 @@ def translate_file():
             para.paragraph_format.space_after = Pt(0)
 
         doc.save(word_output)
+
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
         return send_file(word_output, as_attachment=True)
 
     else:
-        return jsonify({"error": "Unknown service type"}), 400
+        return jsonify({"error": "نوع الخدمة غير معروف. يرجى التحقق من قيمة 'service'."}), 400
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
