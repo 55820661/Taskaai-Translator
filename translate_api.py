@@ -154,7 +154,7 @@ Document Context:
 """
 
             prompt = f"""{Translation_Prompt}
-{glossary_section}Text:
+{glossary_section}
 {paragraph}"""
 
             try:
