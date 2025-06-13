@@ -147,12 +147,11 @@ Document Context:
             matched_terms = match_terms_to_paragraph(paragraph, glossary_df)
             glossary_section = ""
             if matched_terms:
-                glossary_text = "
-".join(matched_terms)
-                glossary_section = f"Glossary:
+                glossary_text = "\n".join(matched_terms)
+                glossary_section = f"""Glossary:
 {glossary_text}
 
-"
+"""
 
             prompt = f"{Translation_Prompt}
 {glossary_section}Text:
