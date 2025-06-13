@@ -153,9 +153,9 @@ Document Context:
 
 """
 
-            prompt = f"{Translation_Prompt}
+            prompt = f"""{Translation_Prompt}
 {glossary_section}Text:
-{paragraph}"
+{paragraph}"""
 
             try:
                 response = openai.ChatCompletion.create(
