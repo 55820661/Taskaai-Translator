@@ -99,13 +99,13 @@ def translate_file():
 
         intro_paragraphs = paragraphs_df.iloc[:2, 0].tolist()
         joined_intro = "\n".join(intro_paragraphs)
-        context_prompt = f"You are given the beginning of a technical or regulatory document.
+        context_prompt = f"""You are given the beginning of a technical or regulatory document.
 Your task is to generate a single clear English sentence that describes the main topic or context of the document.
 
 Content:
 {joined_intro}
 
-Context hint:"
+Context hint:"""
 
         try:
             context_response = openai.ChatCompletion.create(
